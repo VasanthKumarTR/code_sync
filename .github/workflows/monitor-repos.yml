@@ -1,0 +1,124 @@
+name: Monitor New Repositories
+
+on:
+  # Run every 10 minutes to check for new repositories
+  schedule:
+    - cron: '*/10 * * * *'
+  
+  # Allow manual triggering
+  workflow_dispatch:
+
+env:
+  SOURCE_USER: ${{ vars.SOURCE_USER }}
+  TARGET_ORG: ${{ vars.TARGET_ORG }}
+  SOURCE_TOKEN: ${{ secrets.SOURCE_GITHUB_TOKEN }}
+  TARGET_TOKEN: ${{ secrets.TARGET_GITHUB_TOKEN }}
+
+jobs:
+  check-new-repos:
+    runs-on: ubuntu-latest
+    
+    outputs:
+      has-new-repos: ${{ steps.check.outputs.has-new-repos }}
+      
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+    
+    - name: Install dependencies
+      run: npm install @octokit/rest
+    
+    - name: Check for new repositories
+      id: check
+      run: |
+        cat > check-new-repos.js << 'EOF'
+        const { Octokit } = require('@octokit/rest');
+        const fs = require('fs');
+
+        const sourceUser = process.env.SOURCE_USER;
+        const targetOrg = process.env.TARGET_ORG;
+        const sourceToken = process.env.SOURCE_TOKEN;
+        const targetToken = process.env.TARGET_TOKEN;
+
+        const sourceOctokit = new Octokit({ auth: sourceToken });
+        const targetOctokit = new Octokit({ auth: targetToken });
+
+        async function getRepositories(octokit, ownerType, owner) {
+          const repos = [];
+          let page = 1;
+          
+          while (true) {
+            let response;
+            if (ownerType === 'user') {
+              response = await octokit.repos.listForAuthenticatedUser({
+                visibility: 'all',
+                affiliation: 'owner',
+                per_page: 100,
+                page: page
+              });
+            } else {
+              response = await octokit.repos.listForOrg({
+                org: owner,
+                per_page: 100,
+                page: page
+              });
+            }
+            
+            if (response.data.length === 0) break;
+            
+            // Filter repositories that have 'codesync' topic
+            const filteredRepos = response.data.filter(repo => {
+              const topics = repo.topics || [];
+              return topics.includes('codesync');
+            });
+            
+            repos.push(...filteredRepos.map(repo => repo.name));
+            page++;
+          }
+          
+          return repos;
+        }
+
+        async function main() {
+          try {
+            console.log('Checking for new repositories...');
+            
+            const sourceRepos = await getRepositories(sourceOctokit, 'user', sourceUser);
+            const targetRepos = await getRepositories(targetOctokit, 'org', targetOrg);
+            
+            const newRepos = sourceRepos.filter(repo => !targetRepos.includes(repo));
+            
+            console.log(`Source repositories: ${sourceRepos.length}`);
+            console.log(`Target repositories: ${targetRepos.length}`);
+            console.log(`New repositories to sync: ${newRepos.length}`);
+            
+            if (newRepos.length > 0) {
+              console.log('New repositories found:');
+              newRepos.forEach(repo => console.log(`- ${repo}`));
+              require('fs').appendFileSync(process.env.GITHUB_OUTPUT, 'has-new-repos=true\n');
+            } else {
+              console.log('No new repositories found.');
+              require('fs').appendFileSync(process.env.GITHUB_OUTPUT, 'has-new-repos=false\n');
+            }
+            
+          } catch (error) {
+            console.error('Error checking repositories:', error.message);
+            process.exit(1);
+          }
+        }
+
+        main();
+        EOF
+        
+        node check-new-repos.js
+        
+  trigger-sync:
+    needs: check-new-repos
+    if: needs.check-new-repos.outputs.has-new-repos == 'true'
+    uses: ./.github/workflows/sync-repos.yml
+    secrets: inherit

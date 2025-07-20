@@ -1,0 +1,25 @@
+{
+  "name": "github-repo-sync",
+  "version": "1.0.0",
+  "description": "Automated GitHub repository synchronization from personal account to organization",
+  "scripts": {
+    "setup": "./setup.sh"
+  },
+  "dependencies": {
+    "@octokit/rest": "^20.1.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "github",
+    "sync",
+    "repository",
+    "personal-account",
+    "organization",
+    "automation",
+    "github-actions"
+  ],
+  "author": "GitHub Repository Sync",
+  "license": "MIT"
+}

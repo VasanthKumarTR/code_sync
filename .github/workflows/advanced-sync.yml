@@ -1,0 +1,387 @@
+name: Advanced Repository Sync
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - 'package.json'
+      - 'setup.sh'
+  
+  schedule:
+    # Run every 6 hours
+    - cron: '0 */6 * * *'
+  
+  workflow_dispatch:
+    inputs:
+      sync_mode:
+        description: 'Sync mode'
+        required: true
+        default: 'incremental'
+        type: choice
+        options:
+        - incremental
+        - full
+        - dry-run
+      
+      specific_repos:
+        description: 'Specific repositories to sync (comma-separated, optional)'
+        required: false
+        type: string
+      
+      exclude_archived:
+        description: 'Exclude archived repositories'
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.setup.outputs.matrix }}
+      
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        
+    - name: Install dependencies
+      run: npm install @octokit/rest
+      
+    - name: Prepare sync matrix
+      id: setup
+      run: |
+        cat > prepare-matrix.js << 'EOF'
+        const { Octokit } = require('@octokit/rest');
+        
+        const sourceUser = process.env.SOURCE_USER || '${{ vars.SOURCE_USER }}';
+        const targetOrg = process.env.TARGET_ORG || '${{ vars.TARGET_ORG }}';
+        const sourceToken = process.env.SOURCE_TOKEN || '${{ secrets.SOURCE_GITHUB_TOKEN }}';
+        const syncMode = '${{ github.event.inputs.sync_mode || 'incremental' }}';
+        const specificRepos = '${{ github.event.inputs.specific_repos }}';
+        const excludeArchived = '${{ github.event.inputs.exclude_archived }}' !== 'false';
+        
+        const octokit = new Octokit({ auth: sourceToken });
+        
+        async function main() {
+          try {
+            console.log(`Preparing sync matrix for ${sourceUser} -> ${targetOrg}`);
+            console.log(`Sync mode: ${syncMode}`);
+            console.log(`Exclude archived: ${excludeArchived}`);
+            
+            let repos = [];
+            let page = 1;
+            
+            // Get all repositories from source user (personal account)
+            while (true) {
+              const response = await octokit.repos.listForAuthenticatedUser({
+                visibility: 'all',
+                affiliation: 'owner',
+                per_page: 100,
+                page: page
+              });
+              
+              if (response.data.length === 0) break;
+              repos.push(...response.data);
+              page++;
+            }
+            
+            console.log(`Found ${repos.length} total repositories`);
+            
+            // Filter repositories
+            let filteredRepos = repos;
+            
+            // Filter by specific repos if specified
+            if (specificRepos) {
+              const repoList = specificRepos.split(',').map(r => r.trim());
+              filteredRepos = filteredRepos.filter(repo => repoList.includes(repo.name));
+              console.log(`Filtered to ${filteredRepos.length} specific repositories`);
+            }
+            
+            // Filter archived repositories
+            if (excludeArchived) {
+              filteredRepos = filteredRepos.filter(repo => !repo.archived);
+              console.log(`Filtered out archived repos: ${filteredRepos.length} remaining`);
+            }
+            
+            // Filter repositories that have 'codesync' topic
+            filteredRepos = filteredRepos.filter(repo => {
+              const topics = repo.topics || [];
+              return topics.includes('codesync');
+            });
+            console.log(`Filtered to repos with 'codesync' topic: ${filteredRepos.length} remaining`);
+            
+            // Create matrix
+            const matrix = {
+              include: filteredRepos.map(repo => ({
+                name: repo.name,
+                private: repo.private,
+                archived: repo.archived,
+                description: repo.description || '',
+                clone_url: repo.clone_url,
+                has_issues: repo.has_issues,
+                has_projects: repo.has_projects,
+                has_wiki: repo.has_wiki,
+                default_branch: repo.default_branch
+              }))
+            };
+            
+            console.log(`Matrix prepared with ${matrix.include.length} repositories`);
+            
+            // Output matrix
+            const fs = require('fs');
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify(matrix)}\n`);
+            
+            // Also output summary
+            console.log('Repository summary:');
+            if (matrix.include.length === 0) {
+              console.log('  No repositories found with "codesync" topic');
+              console.log('  To sync a repository, add the "codesync" topic to it in GitHub:');
+              console.log('  1. Go to your repository');
+              console.log('  2. Click the gear icon next to "About"');
+              console.log('  3. Add "codesync" to the Topics field');
+            } else {
+              matrix.include.forEach(repo => {
+                const status = repo.archived ? '[ARCHIVED]' : repo.private ? '[PRIVATE]' : '[PUBLIC]';
+                console.log(`  ${status} ${repo.name}`);
+              });
+            }
+            
+          } catch (error) {
+            console.error('Failed to prepare matrix:', error.message);
+            process.exit(1);
+          }
+        }
+        
+        main();
+        EOF
+        
+        SOURCE_USER="${{ vars.SOURCE_USER }}" \
+        TARGET_ORG="${{ vars.TARGET_ORG }}" \
+        SOURCE_TOKEN="${{ secrets.SOURCE_GITHUB_TOKEN }}" \
+        node prepare-matrix.js
+
+  sync:
+    needs: prepare
+    if: fromJSON(needs.prepare.outputs.matrix).include[0] != null
+    runs-on: ubuntu-latest
+    
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+      
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js  
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        
+    - name: Setup Git
+      run: |
+        git config --global user.name "Repository Sync Bot"
+        git config --global user.email "sync-bot@github.com"
+        git config --global init.defaultBranch main
+        
+    - name: Install dependencies
+      run: npm install @octokit/rest
+      
+    - name: Sync repository
+      env:
+        REPO_NAME: ${{ matrix.name }}
+        REPO_PRIVATE: ${{ matrix.private }}
+        REPO_DESCRIPTION: ${{ matrix.description }}
+        REPO_DEFAULT_BRANCH: ${{ matrix.default_branch }}
+        HAS_ISSUES: ${{ matrix.has_issues }}
+        HAS_PROJECTS: ${{ matrix.has_projects }}
+        HAS_WIKI: ${{ matrix.has_wiki }}
+        SYNC_MODE: ${{ github.event.inputs.sync_mode || 'incremental' }}
+      run: |
+        cat > sync-repo.js << 'EOF'
+        const { Octokit } = require('@octokit/rest');
+        const { execSync } = require('child_process');
+        const fs = require('fs');
+        
+        const sourceUser = '${{ vars.SOURCE_USER }}';
+        const targetOrg = '${{ vars.TARGET_ORG }}';
+        const sourceToken = '${{ secrets.SOURCE_GITHUB_TOKEN }}';
+        const targetToken = '${{ secrets.TARGET_GITHUB_TOKEN }}';
+        
+        const repoName = process.env.REPO_NAME;
+        const repoPrivate = process.env.REPO_PRIVATE === 'true';
+        const repoDescription = process.env.REPO_DESCRIPTION;
+        const defaultBranch = process.env.REPO_DEFAULT_BRANCH || 'main';
+        const hasIssues = process.env.HAS_ISSUES === 'true';
+        const hasProjects = process.env.HAS_PROJECTS === 'true';
+        const hasWiki = process.env.HAS_WIKI === 'true';
+        const syncMode = process.env.SYNC_MODE;
+        
+        const sourceOctokit = new Octokit({ auth: sourceToken });
+        const targetOctokit = new Octokit({ auth: targetToken });
+        
+        async function checkTargetRepo() {
+          try {
+            const response = await targetOctokit.repos.get({
+              owner: targetOrg,
+              repo: repoName
+            });
+            return response.data;
+          } catch (error) {
+            if (error.status === 404) return null;
+            throw error;
+          }
+        }
+        
+        async function createTargetRepo() {
+          if (syncMode === 'dry-run') {
+            console.log(`[DRY-RUN] Would create repository: ${repoName}`);
+            return true;
+          }
+          
+          console.log(`Creating repository: ${repoName}`);
+          
+          try {
+            await targetOctokit.repos.createInOrg({
+              org: targetOrg,
+              name: repoName,
+              description: repoDescription,
+              private: repoPrivate,
+              has_issues: hasIssues,
+              has_projects: hasProjects,
+              has_wiki: hasWiki,
+              auto_init: false
+            });
+            
+            // Wait for creation
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            console.log(`✓ Created repository: ${repoName}`);
+            return true;
+            
+          } catch (error) {
+            console.error(`✗ Failed to create repository: ${error.message}`);
+            return false;
+          }
+        }
+        
+        async function syncRepository() {
+          if (syncMode === 'dry-run') {
+            console.log(`[DRY-RUN] Would sync repository: ${repoName}`);
+            return true;
+          }
+          
+          const sourceUrl = `https://x-access-token:${sourceToken}@github.com/${sourceUser}/${repoName}.git`;
+          const targetUrl = `https://x-access-token:${targetToken}@github.com/${targetOrg}/${repoName}.git`;
+          
+          console.log(`Syncing repository: ${repoName}`);
+          
+          try {
+            // Clone source repository
+            console.log('Cloning source repository...');
+            execSync(`git clone --mirror ${sourceUrl} ${repoName}.git`, {
+              stdio: 'pipe',
+              timeout: 300000 // 5 minutes timeout
+            });
+            
+            // Push to target repository
+            console.log('Pushing to target repository...');
+            execSync(`cd ${repoName}.git && git remote set-url origin ${targetUrl}`, { stdio: 'pipe' });
+            execSync(`cd ${repoName}.git && git push --mirror`, {
+              stdio: 'pipe',
+              timeout: 300000 // 5 minutes timeout
+            });
+            
+            console.log(`✓ Successfully synced: ${repoName}`);
+            
+            // Cleanup
+            execSync(`rm -rf ${repoName}.git`);
+            return true;
+            
+          } catch (error) {
+            console.error(`✗ Failed to sync repository: ${error.message}`);
+            // Cleanup on failure
+            try {
+              execSync(`rm -rf ${repoName}.git`);
+            } catch (cleanupError) {
+              // Ignore cleanup errors
+            }
+            return false;
+          }
+        }
+        
+        async function main() {
+          console.log(`\n=== Processing: ${repoName} ===`);
+          console.log(`Mode: ${syncMode}`);
+          console.log(`Private: ${repoPrivate}`);
+          console.log(`Default branch: ${defaultBranch}`);
+          
+          try {
+            // Check if target repository exists
+            const targetRepo = await checkTargetRepo();
+            
+            if (!targetRepo) {
+              console.log('Target repository does not exist');
+              const created = await createTargetRepo();
+              if (!created && syncMode !== 'dry-run') {
+                throw new Error('Failed to create target repository');
+              }
+            } else {
+              console.log('Target repository exists');
+            }
+            
+            // Sync the repository
+            const synced = await syncRepository();
+            if (!synced && syncMode !== 'dry-run') {
+              throw new Error('Failed to sync repository');
+            }
+            
+            console.log(`✅ Completed: ${repoName}`);
+            
+          } catch (error) {
+            console.error(`❌ Failed processing ${repoName}: ${error.message}`);
+            process.exit(1);
+          }
+        }
+        
+        main();
+        EOF
+        
+        node sync-repo.js
+        
+    - name: Cleanup
+      if: always()
+      run: |
+        rm -f sync-repo.js
+        rm -rf *.git
+        
+  summary:
+    needs: [prepare, sync]
+    if: always()
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Generate summary
+      run: |
+        echo "## Repository Sync Summary" >> $GITHUB_STEP_SUMMARY
+        echo "| Status | Repository | Mode |" >> $GITHUB_STEP_SUMMARY  
+        echo "|--------|------------|------|" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "${{ needs.sync.result }}" == "success" ]; then
+          echo "| ✅ | All repositories | ${{ github.event.inputs.sync_mode || 'incremental' }} |" >> $GITHUB_STEP_SUMMARY
+        elif [ "${{ needs.sync.result }}" == "failure" ]; then
+          echo "| ❌ | Some repositories failed | ${{ github.event.inputs.sync_mode || 'incremental' }} |" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "| ⏭️ | Sync skipped | N/A |" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Source User:** ${{ vars.SOURCE_USER }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Target Organization:** ${{ vars.TARGET_ORG }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Sync Mode:** ${{ github.event.inputs.sync_mode || 'incremental' }}" >> $GITHUB_STEP_SUMMARY
