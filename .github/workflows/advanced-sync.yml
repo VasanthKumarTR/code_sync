@@ -290,6 +290,16 @@ jobs:
               timeout: 300000 // 5 minutes timeout
             });
             
+            // Check if the repository has any commits
+            try {
+              execSync(`cd ${repoName} && git rev-parse HEAD`, { stdio: 'pipe' });
+              console.log('Repository has commits, proceeding with sync...');
+            } catch (error) {
+              console.log('⚠️ Repository is empty (no commits), skipping sync');
+              execSync(`rm -rf ${repoName}`);
+              return true;
+            }
+            
             // Configure git for the cloned repository
             execSync(`cd ${repoName} && git config user.name "Repository Sync Bot"`, { stdio: 'pipe' });
             execSync(`cd ${repoName} && git config user.email "sync-bot@github.com"`, { stdio: 'pipe' });
@@ -307,35 +317,52 @@ jobs:
             
             // Create and switch to codesync branch
             try {
-              execSync(`cd ${repoName} && git checkout -b codesync`, { stdio: 'pipe' });
-            } catch (branchError) {
-              // Branch might already exist, try to switch to it or track remote
+              // First check if codesync branch exists locally or remotely
               try {
                 execSync(`cd ${repoName} && git checkout codesync`, { stdio: 'pipe' });
-              } catch (switchError) {
+              } catch (localError) {
+                // Try to checkout from remote
                 try {
                   execSync(`cd ${repoName} && git checkout -b codesync target/codesync`, { stdio: 'pipe' });
-                } catch (trackError) {
+                } catch (remoteError) {
+                  // Create new codesync branch
                   execSync(`cd ${repoName} && git checkout -b codesync`, { stdio: 'pipe' });
                 }
               }
+            } catch (branchError) {
+              throw branchError;
             }
             
             // Merge latest changes from default branch
             try {
               execSync(`cd ${repoName} && git checkout ${defaultBranch}`, { stdio: 'pipe' });
               execSync(`cd ${repoName} && git checkout codesync`, { stdio: 'pipe' });
-              execSync(`cd ${repoName} && git merge ${defaultBranch}`, { stdio: 'pipe' });
+              
+              // Check if there are differences to merge
+              try {
+                execSync(`cd ${repoName} && git diff --quiet codesync ${defaultBranch}`, { stdio: 'pipe' });
+              } catch (diffError) {
+                // There are differences, so merge
+                execSync(`cd ${repoName} && git merge ${defaultBranch} --no-edit`, { stdio: 'pipe' });
+              }
             } catch (mergeError) {
               console.log(`Note: Could not merge ${defaultBranch} into codesync`);
             }
             
             // Push to target repository
             console.log('Pushing to codesync branch in target repository...');
-            execSync(`cd ${repoName} && git push target codesync`, {
-              stdio: 'pipe',
-              timeout: 300000 // 5 minutes timeout
-            });
+            try {
+              execSync(`cd ${repoName} && git push target codesync`, {
+                stdio: 'pipe',
+                timeout: 300000 // 5 minutes timeout
+              });
+            } catch (pushError) {
+              // Try force push if normal push fails
+              execSync(`cd ${repoName} && git push --force-with-lease target codesync`, {
+                stdio: 'pipe',
+                timeout: 300000 // 5 minutes timeout
+              });
+            }
             
             console.log(`✓ Successfully synced: ${repoName}`);
             
