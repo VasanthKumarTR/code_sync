@@ -140,31 +140,77 @@ jobs:
           console.log(`Syncing repository: ${repoName}`);
           
           try {
-            // Clone or fetch source repository
-            const repoExists = fs.existsSync(repoName);
+            // Clone source repository
+            console.log(`Cloning ${repoName}...`);
+            execSync(`git clone ${sourceUrl} ${repoName}`, { stdio: 'inherit' });
             
-            if (!repoExists) {
-              console.log(`Cloning ${repoName}...`);
-              execSync(`git clone --bare ${sourceUrl} ${repoName}`, { stdio: 'inherit' });
-            } else {
-              console.log(`Fetching updates for ${repoName}...`);
-              execSync(`cd ${repoName} && git fetch --all`, { stdio: 'inherit' });
+            // Configure git for the cloned repository
+            execSync(`cd ${repoName} && git config user.name "Repository Sync Bot"`, { stdio: 'inherit' });
+            execSync(`cd ${repoName} && git config user.email "sync-bot@github.com"`, { stdio: 'inherit' });
+            
+            // Add target repository as remote
+            console.log('Adding target repository as remote...');
+            execSync(`cd ${repoName} && git remote add target ${targetUrl}`, { stdio: 'inherit' });
+            
+            // Fetch existing branches from target to check if codesync exists
+            try {
+              execSync(`cd ${repoName} && git fetch target`, { stdio: 'pipe' });
+              console.log('Fetched existing branches from target');
+            } catch (fetchError) {
+              console.log('No existing branches in target repository');
             }
             
-            // Push to target repository
-            console.log(`Pushing ${repoName} to target...`);
-            execSync(`cd ${repoName} && git push --mirror ${targetUrl}`, { stdio: 'inherit' });
+            // Create and switch to codesync branch (or switch to existing one)
+            try {
+              execSync(`cd ${repoName} && git checkout -b codesync`, { stdio: 'pipe' });
+              console.log('Created new codesync branch');
+            } catch (branchError) {
+              // Branch might already exist, try to switch to it
+              try {
+                execSync(`cd ${repoName} && git checkout codesync`, { stdio: 'pipe' });
+                console.log('Switched to existing codesync branch');
+              } catch (switchError) {
+                // If codesync exists on target but not locally, create it tracking the remote
+                try {
+                  execSync(`cd ${repoName} && git checkout -b codesync target/codesync`, { stdio: 'pipe' });
+                  console.log('Created codesync branch tracking remote');
+                } catch (trackError) {
+                  // Fallback: create new codesync branch
+                  execSync(`cd ${repoName} && git checkout -b codesync`, { stdio: 'inherit' });
+                  console.log('Created codesync branch (fallback)');
+                }
+              }
+            }
             
-            console.log(`✓ Successfully synced ${repoName}`);
+            // Merge or rebase latest changes from main/master
+            const mainBranch = sourceRepo.default_branch || 'main';
+            try {
+              execSync(`cd ${repoName} && git checkout ${mainBranch}`, { stdio: 'pipe' });
+              execSync(`cd ${repoName} && git checkout codesync`, { stdio: 'pipe' });
+              execSync(`cd ${repoName} && git merge ${mainBranch}`, { stdio: 'inherit' });
+              console.log(`Merged latest changes from ${mainBranch} into codesync`);
+            } catch (mergeError) {
+              console.log(`Note: Could not merge ${mainBranch} into codesync, pushing current state`);
+            }
+            
+            // Push to codesync branch in target repository
+            console.log('Pushing to codesync branch in target repository...');
+            execSync(`cd ${repoName} && git push target codesync`, { stdio: 'inherit' });
+            
+            console.log(`✓ Successfully synced ${repoName} to codesync branch`);
             
             // Clean up
-            if (!repoExists) {
-              execSync(`rm -rf ${repoName}`);
-            }
+            execSync(`rm -rf ${repoName}`);
             
             return true;
           } catch (error) {
             console.error(`✗ Failed to sync ${repoName}:`, error.message);
+            // Cleanup on failure
+            try {
+              execSync(`rm -rf ${repoName}`);
+            } catch (cleanupError) {
+              // Ignore cleanup errors
+            }
             return false;
           }
         }

@@ -73,15 +73,31 @@ This repository includes three workflows:
   - Manual dispatch with options (dry-run, specific repos, etc.)
 - **Purpose**: Parallel processing with matrix strategy and advanced features
 
+#### `push-trigger.yml` - Individual Repository Push Sync (Template)
+- **Triggers**: 
+  - Push to main/master branch (when placed in individual repos)
+- **Purpose**: Template workflow for immediate sync on push to main
+- **Setup**: Copy this workflow to individual repositories for instant sync on push
+
 ## Features
 
 - ✅ **Topic-based Filtering**: Only syncs repositories with the "codesync" topic
+- ✅ **Branch-based Sync**: Syncs to "codesync" branch (not main) for review
 - ✅ **Automatic repository creation**: Creates repositories in target org if they don't exist
-- ✅ **Mirror sync**: Preserves all branches, tags, and commit history
-- ✅ **Metadata sync**: Copies repository description, visibility, and settings
-- ✅ **Incremental sync**: Only syncs changes, not full repositories each time
+- ✅ **Content sync**: Preserves all commit history and content
+- ✅ **Safe merging**: Allows you to review changes before merging to main
+- ✅ **Incremental sync**: Handles updates to existing branches
 - ✅ **Error handling**: Detailed logging and error reporting
 - ✅ **Skip archived repos**: Automatically skips archived repositories
+
+## How Repository Sync Works
+
+1. **Repository Creation**: If a target repository doesn't exist, it's created automatically
+2. **Content Sync**: Your main branch content is synced to a "codesync" branch in the target repository
+3. **Review Process**: You can review the "codesync" branch and merge to main when ready
+4. **Incremental Updates**: Subsequent pushes update the "codesync" branch with latest changes
+
+This approach ensures you maintain control over what gets merged into the main branch of your target repositories.
 
 ## How to Mark Repositories for Sync
 
@@ -119,6 +135,17 @@ To include a repository in the sync process:
 2. Click the gear icon next to "About"
 3. Add "codesync" to the Topics field
 4. The repository will be included in the next sync run
+
+### Working with the Codesync Branch
+
+When repositories are synced, content goes to the "codesync" branch in the target repository:
+
+1. **Review Changes**: Check the "codesync" branch for new content
+2. **Create Pull Request**: Create a PR from "codesync" to "main" for review
+3. **Merge When Ready**: Merge the PR after review and testing
+4. **Automatic Updates**: Future syncs will update the "codesync" branch
+
+This workflow ensures you maintain control over what enters your main branch.
 
 ### Repository Settings Sync
 

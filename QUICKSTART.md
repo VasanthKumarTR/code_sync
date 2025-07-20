@@ -33,17 +33,19 @@ gh workflow run "Sync Repositories"
 - **advanced-sync.yml**: Parallel sync with options (dry-run, etc.)
 
 ### ✅ Key Features
-- 🔄 **Full Repository Mirror**: All branches, tags, history
+- 🔄 **Content Sync**: Full commit history and content
 - 🏗️ **Auto-Create**: Creates missing repositories  
 - 🏷️ **Topic-based**: Only syncs repos with "codesync" topic
+- 🌿 **Safe Branching**: Syncs to "codesync" branch for review
 - 🚫 **Skip Archived**: Automatically skips archived repos
 - 🔐 **Secure**: Uses encrypted GitHub secrets
 
 ### ✅ Your Requirements Met
 - ✅ **New Repository Creation**: Monitored every 10 minutes
-- ✅ **Push to Main Branch**: Automatic sync on code changes  
+- ✅ **Push to Main Branch**: Content syncs to "codesync" branch  
 - ✅ **Personal Account → Organization**: Perfectly configured
 - ✅ **Selective Sync**: Only repos with "codesync" topic
+- ✅ **Safe Review Process**: Changes go to separate branch first
 
 ## 🎯 Perfect For
 - Syncing your personal repositories to a company organization

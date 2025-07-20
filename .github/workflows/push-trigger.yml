@@ -1,0 +1,70 @@
+name: Push to Main Sync
+
+on:
+  # This workflow should be placed in your personal repositories
+  # It will trigger when you push to main and sync to the target org
+  push:
+    branches: [main, master]
+
+env:
+  SOURCE_USER: ${{ github.repository_owner }}
+  TARGET_ORG: "your-target-org-here"  # Update this with your target org
+  REPO_NAME: ${{ github.event.repository.name }}
+
+jobs:
+  sync-on-push:
+    # Only run if the repository has the 'codesync' topic
+    if: contains(github.event.repository.topics, 'codesync')
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout source repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: Setup Git
+      run: |
+        git config user.name "Repository Sync Bot"
+        git config user.email "sync-bot@github.com"
+        
+    - name: Sync to target organization
+      env:
+        SOURCE_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        TARGET_TOKEN: ${{ secrets.TARGET_ORG_TOKEN }}
+      run: |
+        # Verify we have the required tokens
+        if [ -z "$SOURCE_TOKEN" ] || [ -z "$TARGET_TOKEN" ]; then
+          echo "❌ Missing required secrets:"
+          echo "  - PERSONAL_ACCESS_TOKEN (for source access)"
+          echo "  - TARGET_ORG_TOKEN (for target org access)"
+          exit 1
+        fi
+        
+        # Set up target repository URL
+        TARGET_URL="https://x-access-token:${TARGET_TOKEN}@github.com/${TARGET_ORG}/${REPO_NAME}.git"
+        
+        echo "🔄 Syncing ${REPO_NAME} to ${TARGET_ORG}/codesync branch"
+        
+        # Add target repository as remote
+        git remote add target "$TARGET_URL"
+        
+        # Fetch existing branches from target
+        git fetch target 2>/dev/null || echo "Target repository is empty or doesn't exist"
+        
+        # Create or switch to codesync branch
+        if git show-ref --quiet refs/remotes/target/codesync; then
+          echo "📝 Checking out existing codesync branch"
+          git checkout -b codesync target/codesync
+          git merge ${{ github.ref_name }} --no-edit
+        else
+          echo "🆕 Creating new codesync branch"
+          git checkout -b codesync
+        fi
+        
+        # Push to target repository's codesync branch
+        echo "⬆️ Pushing to target repository..."
+        git push target codesync
+        
+        echo "✅ Successfully synced to ${TARGET_ORG}/${REPO_NAME}/codesync"
+        echo "📋 You can now review and merge the changes in the target repository"

@@ -285,15 +285,54 @@ jobs:
           try {
             // Clone source repository
             console.log('Cloning source repository...');
-            execSync(`git clone --mirror ${sourceUrl} ${repoName}.git`, {
+            execSync(`git clone ${sourceUrl} ${repoName}`, {
               stdio: 'pipe',
               timeout: 300000 // 5 minutes timeout
             });
             
+            // Configure git for the cloned repository
+            execSync(`cd ${repoName} && git config user.name "Repository Sync Bot"`, { stdio: 'pipe' });
+            execSync(`cd ${repoName} && git config user.email "sync-bot@github.com"`, { stdio: 'pipe' });
+            
+            // Add target repository as remote
+            console.log('Adding target repository as remote...');
+            execSync(`cd ${repoName} && git remote add target ${targetUrl}`, { stdio: 'pipe' });
+            
+            // Fetch existing branches from target
+            try {
+              execSync(`cd ${repoName} && git fetch target`, { stdio: 'pipe' });
+            } catch (fetchError) {
+              console.log('No existing branches in target repository');
+            }
+            
+            // Create and switch to codesync branch
+            try {
+              execSync(`cd ${repoName} && git checkout -b codesync`, { stdio: 'pipe' });
+            } catch (branchError) {
+              // Branch might already exist, try to switch to it or track remote
+              try {
+                execSync(`cd ${repoName} && git checkout codesync`, { stdio: 'pipe' });
+              } catch (switchError) {
+                try {
+                  execSync(`cd ${repoName} && git checkout -b codesync target/codesync`, { stdio: 'pipe' });
+                } catch (trackError) {
+                  execSync(`cd ${repoName} && git checkout -b codesync`, { stdio: 'pipe' });
+                }
+              }
+            }
+            
+            // Merge latest changes from default branch
+            try {
+              execSync(`cd ${repoName} && git checkout ${defaultBranch}`, { stdio: 'pipe' });
+              execSync(`cd ${repoName} && git checkout codesync`, { stdio: 'pipe' });
+              execSync(`cd ${repoName} && git merge ${defaultBranch}`, { stdio: 'pipe' });
+            } catch (mergeError) {
+              console.log(`Note: Could not merge ${defaultBranch} into codesync`);
+            }
+            
             // Push to target repository
-            console.log('Pushing to target repository...');
-            execSync(`cd ${repoName}.git && git remote set-url origin ${targetUrl}`, { stdio: 'pipe' });
-            execSync(`cd ${repoName}.git && git push --mirror`, {
+            console.log('Pushing to codesync branch in target repository...');
+            execSync(`cd ${repoName} && git push target codesync`, {
               stdio: 'pipe',
               timeout: 300000 // 5 minutes timeout
             });
@@ -301,14 +340,14 @@ jobs:
             console.log(`✓ Successfully synced: ${repoName}`);
             
             // Cleanup
-            execSync(`rm -rf ${repoName}.git`);
+            execSync(`rm -rf ${repoName}`);
             return true;
             
           } catch (error) {
             console.error(`✗ Failed to sync repository: ${error.message}`);
             // Cleanup on failure
             try {
-              execSync(`rm -rf ${repoName}.git`);
+              execSync(`rm -rf ${repoName}`);
             } catch (cleanupError) {
               // Ignore cleanup errors
             }
@@ -360,6 +399,7 @@ jobs:
       run: |
         rm -f sync-repo.js
         rm -rf *.git
+        rm -rf */
         
   summary:
     needs: [prepare, sync]
