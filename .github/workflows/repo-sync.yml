@@ -1,0 +1,364 @@
+name: Repository Sync
+
+on:
+  # Monitor for changes every 5 minutes (frequent enough to catch pushes quickly)
+  schedule:
+    - cron: '*/5 * * * *'
+  
+  # Allow manual triggering
+  workflow_dispatch:
+    inputs:
+      force_sync_all:
+        description: 'Force sync all repositories (ignore last sync check)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  SOURCE_USER: ${{ vars.SOURCE_USER }}
+  TARGET_ORG: ${{ vars.TARGET_ORG }}
+  SOURCE_TOKEN: ${{ secrets.SOURCE_GITHUB_TOKEN }}
+  TARGET_TOKEN: ${{ secrets.TARGET_GITHUB_TOKEN }}
+
+jobs:
+  sync-repos:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+    
+    - name: Install dependencies
+      run: npm install @octokit/rest
+    
+    - name: Sync repositories
+      run: |
+        cat > sync-repositories.js << 'EOF'
+        const { Octokit } = require('@octokit/rest');
+        const { execSync } = require('child_process');
+        const fs = require('fs');
+
+        const sourceUser = process.env.SOURCE_USER;
+        const targetOrg = process.env.TARGET_ORG;
+        const sourceToken = process.env.SOURCE_TOKEN;
+        const targetToken = process.env.TARGET_TOKEN;
+        const forceSync = process.env.FORCE_SYNC === 'true';
+
+        if (!sourceUser || !targetOrg || !sourceToken || !targetToken) {
+          console.error('❌ Missing required environment variables');
+          process.exit(1);
+        }
+
+        const sourceOctokit = new Octokit({ auth: sourceToken });
+        const targetOctokit = new Octokit({ auth: targetToken });
+
+        // Store last sync times to detect changes
+        const SYNC_STATE_FILE = 'last-sync-state.json';
+        
+        function loadSyncState() {
+          try {
+            if (fs.existsSync(SYNC_STATE_FILE)) {
+              return JSON.parse(fs.readFileSync(SYNC_STATE_FILE, 'utf8'));
+            }
+          } catch (error) {
+            console.log('⚠️ Could not load sync state, treating as first run');
+          }
+          return {};
+        }
+        
+        function saveSyncState(state) {
+          try {
+            fs.writeFileSync(SYNC_STATE_FILE, JSON.stringify(state, null, 2));
+          } catch (error) {
+            console.log('⚠️ Could not save sync state');
+          }
+        }
+
+        async function getRepositoriesWithCodeSyncTopic() {
+          console.log(`🔍 Fetching repositories with 'codesync' topic from ${sourceUser}...`);
+          
+          const repos = [];
+          let page = 1;
+          
+          while (true) {
+            const response = await sourceOctokit.repos.listForAuthenticatedUser({
+              visibility: 'all',
+              affiliation: 'owner',
+              per_page: 100,
+              page: page
+            });
+            
+            if (response.data.length === 0) break;
+            
+            // Filter for repos with 'codesync' topic and not archived
+            const filteredRepos = response.data.filter(repo => {
+              const topics = repo.topics || [];
+              return topics.includes('codesync') && !repo.archived;
+            });
+            
+            repos.push(...filteredRepos);
+            page++;
+          }
+          
+          console.log(`✅ Found ${repos.length} repositories with 'codesync' topic`);
+          return repos;
+        }
+
+        async function checkIfTargetRepoExists(repoName) {
+          try {
+            await targetOctokit.repos.get({
+              owner: targetOrg,
+              repo: repoName
+            });
+            return true;
+          } catch (error) {
+            if (error.status === 404) return false;
+            throw error;
+          }
+        }
+
+        async function createTargetRepo(sourceRepo) {
+          console.log(`🏗️ Creating repository ${sourceRepo.name} in ${targetOrg}...`);
+          
+          try {
+            await targetOctokit.repos.createInOrg({
+              org: targetOrg,
+              name: sourceRepo.name,
+              description: sourceRepo.description || '',
+              private: sourceRepo.private,
+              has_issues: sourceRepo.has_issues,
+              has_projects: sourceRepo.has_projects,
+              has_wiki: sourceRepo.has_wiki,
+              auto_init: false
+            });
+            
+            console.log(`✅ Created repository ${sourceRepo.name}`);
+            // Wait for repository to be fully created
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            return true;
+          } catch (error) {
+            console.error(`❌ Failed to create repository ${sourceRepo.name}:`, error.message);
+            return false;
+          }
+        }
+
+        async function syncRepository(sourceRepo, lastSyncTime) {
+          const repoName = sourceRepo.name;
+          
+          // Check if repo has been updated since last sync (unless forced)
+          if (!forceSync && lastSyncTime) {
+            const lastPush = new Date(sourceRepo.pushed_at);
+            const lastSync = new Date(lastSyncTime);
+            
+            if (lastPush <= lastSync) {
+              console.log(`⏭️ Skipping ${repoName} - no changes since last sync`);
+              return { success: true, skipped: true };
+            }
+          }
+          
+          const sourceUrl = `https://x-access-token:${sourceToken}@github.com/${sourceUser}/${repoName}.git`;
+          const targetUrl = `https://x-access-token:${targetToken}@github.com/${targetOrg}/${repoName}.git`;
+          
+          console.log(`🔄 Syncing repository: ${repoName}`);
+          
+          try {
+            // Clone source repository
+            console.log('📥 Cloning source repository...');
+            execSync(`git clone ${sourceUrl} ${repoName}`, { 
+              stdio: 'pipe',
+              timeout: 300000 
+            });
+            
+            // Check if repository has commits
+            try {
+              execSync(`cd ${repoName} && git rev-parse HEAD`, { stdio: 'pipe' });
+            } catch (error) {
+              console.log('⚠️ Repository is empty, skipping sync');
+              execSync(`rm -rf ${repoName}`);
+              return { success: true, skipped: true };
+            }
+            
+            // Configure git
+            execSync(`cd ${repoName} && git config user.name "Repository Sync Bot"`, { stdio: 'pipe' });
+            execSync(`cd ${repoName} && git config user.email "sync-bot@github.com"`, { stdio: 'pipe' });
+            
+            // Add target as remote
+            execSync(`cd ${repoName} && git remote add target ${targetUrl}`, { stdio: 'pipe' });
+            
+            // Fetch existing branches from target
+            try {
+              execSync(`cd ${repoName} && git fetch target`, { stdio: 'pipe' });
+            } catch (fetchError) {
+              console.log('📝 Target repository is empty');
+            }
+            
+            // Create/switch to codesync branch
+            const defaultBranch = sourceRepo.default_branch || 'main';
+            try {
+              // Try to checkout existing codesync branch from target
+              try {
+                execSync(`cd ${repoName} && git checkout -b codesync target/codesync`, { stdio: 'pipe' });
+                console.log('📝 Using existing codesync branch');
+              } catch (remoteError) {
+                // Create new codesync branch from default branch
+                execSync(`cd ${repoName} && git checkout -b codesync`, { stdio: 'pipe' });
+                console.log('🆕 Created new codesync branch');
+              }
+              
+              // Merge latest changes from default branch
+              execSync(`cd ${repoName} && git checkout ${defaultBranch}`, { stdio: 'pipe' });
+              execSync(`cd ${repoName} && git checkout codesync`, { stdio: 'pipe' });
+              
+              // Check for differences and merge if needed
+              try {
+                execSync(`cd ${repoName} && git diff --quiet codesync ${defaultBranch}`, { stdio: 'pipe' });
+                console.log('📝 codesync branch is up to date');
+              } catch (diffError) {
+                execSync(`cd ${repoName} && git merge ${defaultBranch} --no-edit`, { stdio: 'pipe' });
+                console.log('🔀 Merged latest changes into codesync');
+              }
+            } catch (branchError) {
+              throw new Error(`Branch management failed: ${branchError.message}`);
+            }
+            
+            // Push to target repository
+            console.log('📤 Pushing to target repository...');
+            try {
+              execSync(`cd ${repoName} && git push target codesync`, { 
+                stdio: 'pipe',
+                timeout: 300000 
+              });
+              console.log(`✅ Successfully synced ${repoName}`);
+            } catch (pushError) {
+              // Try force push with lease
+              console.log('🔄 Retrying with force-with-lease...');
+              execSync(`cd ${repoName} && git push --force-with-lease target codesync`, { 
+                stdio: 'pipe',
+                timeout: 300000 
+              });
+              console.log(`✅ Force-synced ${repoName}`);
+            }
+            
+            // Cleanup
+            execSync(`rm -rf ${repoName}`);
+            return { success: true, skipped: false };
+            
+          } catch (error) {
+            console.error(`❌ Failed to sync ${repoName}:`, error.message);
+            // Cleanup on failure
+            try {
+              execSync(`rm -rf ${repoName}`);
+            } catch (cleanupError) {
+              // Ignore cleanup errors
+            }
+            return { success: false, skipped: false };
+          }
+        }
+
+        async function main() {
+          console.log('🚀 Starting repository sync...');
+          console.log(`📂 Source: ${sourceUser}`);
+          console.log(`🏢 Target: ${targetOrg}`);
+          console.log(`🔄 Force sync: ${forceSync}`);
+          
+          const syncState = loadSyncState();
+          const currentTime = new Date().toISOString();
+          
+          try {
+            const repos = await getRepositoriesWithCodeSyncTopic();
+            
+            if (repos.length === 0) {
+              console.log('ℹ️ No repositories found with "codesync" topic');
+              console.log('💡 To sync a repository, add the "codesync" topic to it in GitHub');
+              return;
+            }
+            
+            const results = {
+              total: repos.length,
+              synced: 0,
+              skipped: 0,
+              created: 0,
+              failed: 0
+            };
+            
+            for (const repo of repos) {
+              console.log(`\n--- Processing ${repo.name} ---`);
+              
+              // Check if target repository exists
+              const exists = await checkIfTargetRepoExists(repo.name);
+              
+              if (!exists) {
+                const created = await createTargetRepo(repo);
+                if (created) {
+                  results.created++;
+                } else {
+                  results.failed++;
+                  continue;
+                }
+              }
+              
+              // Sync the repository
+              const lastSync = syncState[repo.name]?.lastSync;
+              const result = await syncRepository(repo, lastSync);
+              
+              if (result.success) {
+                if (result.skipped) {
+                  results.skipped++;
+                } else {
+                  results.synced++;
+                  // Update sync state
+                  syncState[repo.name] = {
+                    lastSync: currentTime,
+                    lastPush: repo.pushed_at
+                  };
+                }
+              } else {
+                results.failed++;
+              }
+            }
+            
+            // Save updated sync state
+            saveSyncState(syncState);
+            
+            console.log('\n📊 === SYNC SUMMARY ===');
+            console.log(`📁 Total repositories: ${results.total}`);
+            console.log(`🆕 Created: ${results.created}`);
+            console.log(`🔄 Synced: ${results.synced}`);
+            console.log(`⏭️ Skipped (no changes): ${results.skipped}`);
+            console.log(`❌ Failed: ${results.failed}`);
+            
+            if (results.failed > 0) {
+              console.log('\n⚠️ Some repositories failed to sync. Check the logs above.');
+              process.exit(1);
+            }
+            
+            if (results.synced > 0) {
+              console.log('\n✅ Sync completed successfully!');
+              console.log('📋 Review the "codesync" branches in your target repositories');
+            } else if (results.skipped === results.total) {
+              console.log('\n✅ All repositories are up to date!');
+            }
+            
+          } catch (error) {
+            console.error('💥 Sync failed:', error.message);
+            process.exit(1);
+          }
+        }
+
+        main();
+        EOF
+        
+        FORCE_SYNC="${{ github.event.inputs.force_sync_all }}" node sync-repositories.js
+      
+    - name: Cleanup
+      if: always()
+      run: |
+        rm -f sync-repositories.js
+        rm -f last-sync-state.json
+        rm -rf *.git
+        rm -rf */
