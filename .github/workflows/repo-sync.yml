@@ -81,10 +81,8 @@ jobs:
 
         async function getRepositoriesWithCodeSyncTopic() {
           console.log(`🔍 Fetching repositories with 'codesync' topic from ${sourceUser}...`);
-          
           const repos = [];
           let page = 1;
-          
           while (true) {
             const response = await sourceOctokit.repos.listForAuthenticatedUser({
               visibility: 'all',
@@ -92,19 +90,19 @@ jobs:
               per_page: 100,
               page: page
             });
-            
             if (response.data.length === 0) break;
-            
             // Filter for repos with 'codesync' topic and not archived
             const filteredRepos = response.data.filter(repo => {
               const topics = repo.topics || [];
               return topics.includes('codesync') && !repo.archived;
             });
-            
+            // Attach topics to each repo for later use
+            filteredRepos.forEach(repo => {
+              repo._codesync_topics = repo.topics || [];
+            });
             repos.push(...filteredRepos);
             page++;
           }
-          
           console.log(`✅ Found ${repos.length} repositories with 'codesync' topic`);
           return repos;
         }
@@ -263,21 +261,22 @@ jobs:
         async function main() {
           console.log('🚀 Starting repository sync...');
           console.log(`📂 Source: ${sourceUser}`);
-          console.log(`🏢 Target: ${targetOrg}`);
+          console.log(`🏢 Default Target: ${targetOrg}`);
           console.log(`🔄 Force sync: ${forceSync}`);
-          
           const syncState = loadSyncState();
           const currentTime = new Date().toISOString();
-          
+          // Org mapping for topics
+          const orgMap = {
+            icp21: 'icp21',
+            espresso21: 'espresso21'
+          };
           try {
             const repos = await getRepositoriesWithCodeSyncTopic();
-            
             if (repos.length === 0) {
               console.log('ℹ️ No repositories found with "codesync" topic');
               console.log('💡 To sync a repository, add the "codesync" topic to it in GitHub');
               return;
             }
-            
             const results = {
               total: repos.length,
               synced: 0,
@@ -285,65 +284,103 @@ jobs:
               created: 0,
               failed: 0
             };
-            
             for (const repo of repos) {
-              console.log(`\n--- Processing ${repo.name} ---`);
-              
-              // Check if target repository exists
-              const exists = await checkIfTargetRepoExists(repo.name);
-              
-              if (!exists) {
-                const created = await createTargetRepo(repo);
-                if (created) {
-                  results.created++;
-                } else {
-                  results.failed++;
-                  continue;
+              const topics = repo._codesync_topics || [];
+              // Determine orgs to sync to
+              let orgs = [];
+              if (topics.includes('icp21')) orgs.push(orgMap.icp21);
+              if (topics.includes('espresso21')) orgs.push(orgMap.espresso21);
+              if (orgs.length === 0) orgs = [targetOrg];
+              for (const org of orgs) {
+                console.log(`\n--- Processing ${repo.name} for org: ${org} ---`);
+                // Check if target repository exists
+                const exists = await (async () => {
+                  try {
+                    await targetOctokit.repos.get({ owner: org, repo: repo.name });
+                    return true;
+                  } catch (error) {
+                    if (error.status === 404) return false;
+                    throw error;
+                  }
+                })();
+                if (!exists) {
+                  // Create repo in the correct org
+                  const created = await (async () => {
+                    try {
+                      await targetOctokit.repos.createInOrg({
+                        org: org,
+                        name: repo.name,
+                        description: repo.description || '',
+                        private: repo.private,
+                        has_issues: repo.has_issues,
+                        has_projects: repo.has_projects,
+                        has_wiki: repo.has_wiki,
+                        auto_init: false
+                      });
+                      console.log(`✅ Created repository ${repo.name} in ${org}`);
+                      await new Promise(resolve => setTimeout(resolve, 3000));
+                      return true;
+                    } catch (error) {
+                      console.error(`❌ Failed to create repository ${repo.name} in ${org}:`, error.message);
+                      return false;
+                    }
+                  })();
+                  if (created) {
+                    results.created++;
+                  } else {
+                    results.failed++;
+                    continue;
+                  }
                 }
-              }
-              
-              // Sync the repository
-              const lastSync = syncState[repo.name]?.lastSync;
-              const result = await syncRepository(repo, lastSync);
-              
-              if (result.success) {
-                if (result.skipped) {
-                  results.skipped++;
-                } else {
-                  results.synced++;
-                  // Update sync state
-                  syncState[repo.name] = {
-                    lastSync: currentTime,
-                    lastPush: repo.pushed_at
-                  };
+                // Sync the repository
+                // Patch: temporarily override targetOrg for syncRepository
+                const origTargetOrg = targetOrg;
+                try {
+                  // Override targetOrg for this sync
+                  global.targetOrg = org;
+                  const lastSync = syncState[`${repo.name}__${org}`]?.lastSync;
+                  // Patch: temporarily override process.env.TARGET_ORG for syncRepository
+                  process.env.TARGET_ORG = org;
+                  const result = await syncRepository(repo, lastSync);
+                  if (result.success) {
+                    if (result.skipped) {
+                      results.skipped++;
+                    } else {
+                      results.synced++;
+                      // Update sync state
+                      syncState[`${repo.name}__${org}`] = {
+                        lastSync: currentTime,
+                        lastPush: repo.pushed_at
+                      };
+                    }
+                  } else {
+                    results.failed++;
+                  }
+                } finally {
+                  // Restore targetOrg
+                  global.targetOrg = origTargetOrg;
+                  process.env.TARGET_ORG = origTargetOrg;
                 }
-              } else {
-                results.failed++;
               }
             }
-            
             // Save updated sync state
             saveSyncState(syncState);
-            
             console.log('\n📊 === SYNC SUMMARY ===');
             console.log(`📁 Total repositories: ${results.total}`);
             console.log(`🆕 Created: ${results.created}`);
             console.log(`🔄 Synced: ${results.synced}`);
             console.log(`⏭️ Skipped (no changes): ${results.skipped}`);
             console.log(`❌ Failed: ${results.failed}`);
-            
             if (results.failed > 0) {
               console.log('\n⚠️ Some repositories failed to sync. Check the logs above.');
               process.exit(1);
             }
-            
             if (results.synced > 0) {
               console.log('\n✅ Sync completed successfully!');
               console.log('📋 Review the "codesync" branches in your target repositories');
             } else if (results.skipped === results.total) {
               console.log('\n✅ All repositories are up to date!');
             }
-            
           } catch (error) {
             console.error('💥 Sync failed:', error.message);
             process.exit(1);
