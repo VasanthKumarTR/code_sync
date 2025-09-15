@@ -10,12 +10,20 @@ chmod +x setup.sh
 ./setup.sh
 ```
 
-### 2. Add Topic to Repositories
-Add the `codesync` topic to any repository you want to sync:
+### 2. Add Topics to Repositories
+
+**For Multi-Organization Sync:**
+Add both `codesync` and an organization-specific topic to your repositories:
 - Go to your repository on GitHub
 - Click the gear ⚙️ icon next to "About"  
-- Add `codesync` in the Topics field
+- Add topics in the Topics field:
+  - `codesync` + `icp21` → Syncs to icp21 organization
+  - `codesync` + `espresso21` → Syncs to espresso21 organization
 - Save changes
+
+**For Single Organization Sync:**
+Add only the `codesync` topic to sync to your default organization (if configured):
+- Add `codesync` in the Topics field
 
 ### 3. Run Initial Sync
 ```bash
@@ -35,9 +43,11 @@ gh workflow run "Sync Repositories"
 ### ✅ Key Features
 - 🔄 **Content Sync**: Full commit history and content
 - 🏗️ **Auto-Create**: Creates missing repositories  
-- 🏷️ **Topic-based**: Only syncs repos with "codesync" topic
+- 🏷️ **Multi-Org Sync**: Different repos to different organizations based on topics
+- 🎯 **Organization Selection**: `codesync + icp21` → icp21 org, `codesync + espresso21` → espresso21 org
 - 🌿 **Safe Branching**: Syncs to "codesync" branch for review
 - 🚫 **Skip Archived**: Automatically skips archived repos
+- 📊 **Per-Org Stats**: Detailed sync statistics for each organization
 - 🔐 **Secure**: Uses encrypted GitHub secrets
 
 ### ✅ Your Requirements Met
@@ -48,9 +58,11 @@ gh workflow run "Sync Repositories"
 - ✅ **Safe Review Process**: Changes go to separate branch first
 
 ## 🎯 Perfect For
-- Syncing your personal repositories to a company organization
-- Creating selective backups of important repositories
-- Moving specific projects to an organization structure
+- Syncing different repositories to different organizations based on project types
+- Managing multiple organization targets from a single personal account
+- Creating selective backups to specific organizations
+- Moving specific projects to appropriate organization structures
+- Centralized management of multi-organization repository synchronization
 
 That's it! Simple, clean, and focused on your exact needs.
 

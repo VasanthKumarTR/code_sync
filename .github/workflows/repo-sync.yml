@@ -19,6 +19,8 @@ env:
   TARGET_ORG: ${{ vars.TARGET_ORG }}
   SOURCE_TOKEN: ${{ secrets.SOURCE_GITHUB_TOKEN }}
   TARGET_TOKEN: ${{ secrets.TARGET_GITHUB_TOKEN }}
+  ICP21_TOKEN: ${{ secrets.ICP21_GITHUB_TOKEN }}
+  ESPRESSO21_TOKEN: ${{ secrets.ESPRESSO21_GITHUB_TOKEN }}
 
 jobs:
   sync-repos:
@@ -47,15 +49,27 @@ jobs:
         const targetOrg = process.env.TARGET_ORG;
         const sourceToken = process.env.SOURCE_TOKEN;
         const targetToken = process.env.TARGET_TOKEN;
+        const icp21Token = process.env.ICP21_TOKEN;
+        const espresso21Token = process.env.ESPRESSO21_TOKEN;
         const forceSync = process.env.FORCE_SYNC === 'true';
 
-        if (!sourceUser || !targetOrg || !sourceToken || !targetToken) {
-          console.error('❌ Missing required environment variables');
+        if (!sourceUser || !sourceToken) {
+          console.error('❌ Missing required SOURCE_USER or SOURCE_TOKEN environment variables');
           process.exit(1);
         }
 
+        // Organization mapping based on topics
+        const orgMapping = {
+          'icp21': { org: 'icp21', token: icp21Token },
+          'espresso21': { org: 'espresso21', token: espresso21Token }
+        };
+
+        // Fallback to default target org if available
+        if (targetOrg && targetToken) {
+          orgMapping.default = { org: targetOrg, token: targetToken };
+        }
+
         const sourceOctokit = new Octokit({ auth: sourceToken });
-        const targetOctokit = new Octokit({ auth: targetToken });
 
         // Store last sync times to detect changes
         const SYNC_STATE_FILE = 'last-sync-state.json';
@@ -79,6 +93,22 @@ jobs:
           }
         }
 
+        function determineTargetOrg(repoTopics) {
+          // Check for organization-specific topics
+          for (const topic of repoTopics) {
+            if (orgMapping[topic] && orgMapping[topic].token) {
+              return orgMapping[topic];
+            }
+          }
+          
+          // Fallback to default org if configured
+          if (orgMapping.default) {
+            return orgMapping.default;
+          }
+          
+          return null;
+        }
+
         async function getRepositoriesWithCodeSyncTopic() {
           console.log(`🔍 Fetching repositories with 'codesync' topic from ${sourceUser}...`);
           
@@ -98,21 +128,24 @@ jobs:
             // Filter for repos with 'codesync' topic and not archived
             const filteredRepos = response.data.filter(repo => {
               const topics = repo.topics || [];
-              return topics.includes('codesync') && !repo.archived;
+              const hasCodeSync = topics.includes('codesync');
+              const hasTargetOrg = determineTargetOrg(topics) !== null;
+              return hasCodeSync && hasTargetOrg && !repo.archived;
             });
             
             repos.push(...filteredRepos);
             page++;
           }
           
-          console.log(`✅ Found ${repos.length} repositories with 'codesync' topic`);
+          console.log(`✅ Found ${repos.length} repositories with 'codesync' topic and valid target org`);
           return repos;
         }
 
-        async function checkIfTargetRepoExists(repoName) {
+        async function checkIfTargetRepoExists(repoName, targetOrgConfig) {
           try {
+            const targetOctokit = new Octokit({ auth: targetOrgConfig.token });
             await targetOctokit.repos.get({
-              owner: targetOrg,
+              owner: targetOrgConfig.org,
               repo: repoName
             });
             return true;
@@ -122,12 +155,13 @@ jobs:
           }
         }
 
-        async function createTargetRepo(sourceRepo) {
-          console.log(`🏗️ Creating repository ${sourceRepo.name} in ${targetOrg}...`);
+        async function createTargetRepo(sourceRepo, targetOrgConfig) {
+          console.log(`🏗️ Creating repository ${sourceRepo.name} in ${targetOrgConfig.org}...`);
           
           try {
+            const targetOctokit = new Octokit({ auth: targetOrgConfig.token });
             await targetOctokit.repos.createInOrg({
-              org: targetOrg,
+              org: targetOrgConfig.org,
               name: sourceRepo.name,
               description: sourceRepo.description || '',
               private: sourceRepo.private,
@@ -137,17 +171,17 @@ jobs:
               auto_init: false
             });
             
-            console.log(`✅ Created repository ${sourceRepo.name}`);
+            console.log(`✅ Created repository ${sourceRepo.name} in ${targetOrgConfig.org}`);
             // Wait for repository to be fully created
             await new Promise(resolve => setTimeout(resolve, 3000));
             return true;
           } catch (error) {
-            console.error(`❌ Failed to create repository ${sourceRepo.name}:`, error.message);
+            console.error(`❌ Failed to create repository ${sourceRepo.name} in ${targetOrgConfig.org}:`, error.message);
             return false;
           }
         }
 
-        async function syncRepository(sourceRepo, lastSyncTime) {
+        async function syncRepository(sourceRepo, targetOrgConfig, lastSyncTime) {
           const repoName = sourceRepo.name;
           
           // Check if repo has been updated since last sync (unless forced)
@@ -162,9 +196,9 @@ jobs:
           }
           
           const sourceUrl = `https://x-access-token:${sourceToken}@github.com/${sourceUser}/${repoName}.git`;
-          const targetUrl = `https://x-access-token:${targetToken}@github.com/${targetOrg}/${repoName}.git`;
+          const targetUrl = `https://x-access-token:${targetOrgConfig.token}@github.com/${targetOrgConfig.org}/${repoName}.git`;
           
-          console.log(`🔄 Syncing repository: ${repoName}`);
+          console.log(`🔄 Syncing repository: ${repoName} to ${targetOrgConfig.org}`);
           
           try {
             // Clone source repository
@@ -227,13 +261,13 @@ jobs:
             }
             
             // Push to target repository
-            console.log('📤 Pushing to target repository...');
+            console.log(`📤 Pushing to target repository in ${targetOrgConfig.org}...`);
             try {
               execSync(`cd ${repoName} && git push target codesync`, { 
                 stdio: 'pipe',
                 timeout: 300000 
               });
-              console.log(`✅ Successfully synced ${repoName}`);
+              console.log(`✅ Successfully synced ${repoName} to ${targetOrgConfig.org}`);
             } catch (pushError) {
               // Try force push with lease
               console.log('🔄 Retrying with force-with-lease...');
@@ -241,7 +275,7 @@ jobs:
                 stdio: 'pipe',
                 timeout: 300000 
               });
-              console.log(`✅ Force-synced ${repoName}`);
+              console.log(`✅ Force-synced ${repoName} to ${targetOrgConfig.org}`);
             }
             
             // Cleanup
@@ -249,7 +283,7 @@ jobs:
             return { success: true, skipped: false };
             
           } catch (error) {
-            console.error(`❌ Failed to sync ${repoName}:`, error.message);
+            console.error(`❌ Failed to sync ${repoName} to ${targetOrgConfig.org}:`, error.message);
             // Cleanup on failure
             try {
               execSync(`rm -rf ${repoName}`);
@@ -263,8 +297,14 @@ jobs:
         async function main() {
           console.log('🚀 Starting repository sync...');
           console.log(`📂 Source: ${sourceUser}`);
-          console.log(`🏢 Target: ${targetOrg}`);
           console.log(`🔄 Force sync: ${forceSync}`);
+          
+          // Display available organizations
+          const availableOrgs = Object.keys(orgMapping).filter(key => key !== 'default' && orgMapping[key].token);
+          if (orgMapping.default) {
+            availableOrgs.push(`default (${orgMapping.default.org})`);
+          }
+          console.log(`🏢 Available target orgs: ${availableOrgs.join(', ')}`);
           
           const syncState = loadSyncState();
           const currentTime = new Date().toISOString();
@@ -273,8 +313,9 @@ jobs:
             const repos = await getRepositoriesWithCodeSyncTopic();
             
             if (repos.length === 0) {
-              console.log('ℹ️ No repositories found with "codesync" topic');
-              console.log('💡 To sync a repository, add the "codesync" topic to it in GitHub');
+              console.log('ℹ️ No repositories found with "codesync" topic and valid target organization');
+              console.log('💡 To sync a repository, add the "codesync" topic plus one of: icp21, espresso21');
+              console.log('💡 Or configure default TARGET_ORG and TARGET_GITHUB_TOKEN for fallback');
               return;
             }
             
@@ -283,42 +324,65 @@ jobs:
               synced: 0,
               skipped: 0,
               created: 0,
-              failed: 0
+              failed: 0,
+              byOrg: {}
             };
             
             for (const repo of repos) {
               console.log(`\n--- Processing ${repo.name} ---`);
               
+              // Determine target organization
+              const targetOrgConfig = determineTargetOrg(repo.topics || []);
+              if (!targetOrgConfig) {
+                console.log(`❌ No valid target organization found for ${repo.name}`);
+                results.failed++;
+                continue;
+              }
+              
+              console.log(`🎯 Target organization: ${targetOrgConfig.org}`);
+              
+              // Initialize org stats if needed
+              if (!results.byOrg[targetOrgConfig.org]) {
+                results.byOrg[targetOrgConfig.org] = { synced: 0, created: 0, skipped: 0, failed: 0 };
+              }
+              
               // Check if target repository exists
-              const exists = await checkIfTargetRepoExists(repo.name);
+              const exists = await checkIfTargetRepoExists(repo.name, targetOrgConfig);
               
               if (!exists) {
-                const created = await createTargetRepo(repo);
+                const created = await createTargetRepo(repo, targetOrgConfig);
                 if (created) {
                   results.created++;
+                  results.byOrg[targetOrgConfig.org].created++;
                 } else {
                   results.failed++;
+                  results.byOrg[targetOrgConfig.org].failed++;
                   continue;
                 }
               }
               
               // Sync the repository
-              const lastSync = syncState[repo.name]?.lastSync;
-              const result = await syncRepository(repo, lastSync);
+              const syncKey = `${targetOrgConfig.org}/${repo.name}`;
+              const lastSync = syncState[syncKey]?.lastSync;
+              const result = await syncRepository(repo, targetOrgConfig, lastSync);
               
               if (result.success) {
                 if (result.skipped) {
                   results.skipped++;
+                  results.byOrg[targetOrgConfig.org].skipped++;
                 } else {
                   results.synced++;
-                  // Update sync state
-                  syncState[repo.name] = {
+                  results.byOrg[targetOrgConfig.org].synced++;
+                  // Update sync state with org-specific key
+                  syncState[syncKey] = {
                     lastSync: currentTime,
-                    lastPush: repo.pushed_at
+                    lastPush: repo.pushed_at,
+                    targetOrg: targetOrgConfig.org
                   };
                 }
               } else {
                 results.failed++;
+                results.byOrg[targetOrgConfig.org].failed++;
               }
             }
             
@@ -331,6 +395,12 @@ jobs:
             console.log(`🔄 Synced: ${results.synced}`);
             console.log(`⏭️ Skipped (no changes): ${results.skipped}`);
             console.log(`❌ Failed: ${results.failed}`);
+            
+            // Per-organization breakdown
+            console.log('\n📊 === BY ORGANIZATION ===');
+            for (const [org, stats] of Object.entries(results.byOrg)) {
+              console.log(`🏢 ${org}: created=${stats.created}, synced=${stats.synced}, skipped=${stats.skipped}, failed=${stats.failed}`);
+            }
             
             if (results.failed > 0) {
               console.log('\n⚠️ Some repositories failed to sync. Check the logs above.');
