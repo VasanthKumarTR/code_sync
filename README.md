@@ -8,14 +8,57 @@
    - `read:user` (Read user profile information)
 4. Copy the token and add it as `SOURCE_GITHUB_TOKEN` secret
 
-#### For Target Organization:
+#### For Target Organizations:
+
+**For icp21 Organization:**
 1. Go to `Settings > Developer settings > Personal access tokens > Tokens (classic)`
 2. Click "Generate new token (classic)"  
 3. Select these scopes:
    - `repo` (Full control of private repositories)
    - `read:org` (Read org and team membership)
    - `write:org` (Manage org access - needed to create repositories)
-4. Copy the token and add it as `TARGET_GITHUB_TOKEN` secrets repository contains GitHub Actions workflows to automatically sync repositories from a personal GitHub account to a GitHub organization.
+4. Copy the token and add it as `ICP21_GITHUB_TOKEN` secret
+
+**For espresso21 Organization:**
+1. Follow the same steps as above
+2. Add the token as `ESPRESSO21_GITHUB_TOKEN` secret
+
+**For Default/Legacy Target Organization:**
+1. Follow the same steps as above
+2. Add the token as `TARGET_GITHUB_TOKEN` secret
+
+## Multi-Organization Setup
+
+This tool now supports syncing different repositories to different organizations based on their topics:
+
+### Setup for Multiple Organizations
+
+1. **Configure Secrets**: Add tokens for each organization you want to sync to:
+   ```
+   SOURCE_GITHUB_TOKEN    - Your personal account token
+   ICP21_GITHUB_TOKEN     - Token for icp21 organization  
+   ESPRESSO21_GITHUB_TOKEN - Token for espresso21 organization
+   TARGET_GITHUB_TOKEN    - Token for default organization (optional)
+   ```
+
+2. **Configure Variables**:
+   ```
+   SOURCE_USER            - Your GitHub username
+   TARGET_ORG            - Default organization name (optional)
+   ```
+
+3. **Tag your repositories** with appropriate topics:
+   - `codesync + icp21` → Syncs to icp21 organization
+   - `codesync + espresso21` → Syncs to espresso21 organization
+   - `codesync` only → Syncs to default organization (if configured)
+
+### Benefits of Multi-Organization Sync
+
+- **Flexible Routing**: Different repositories can sync to different organizations
+- **Centralized Management**: Manage sync for multiple organizations from one workflow  
+- **Topic-Based Control**: Simple topic system to control sync destinations
+- **Backward Compatible**: Existing single-org setups continue to work
+- **Per-Org Statistics**: Get detailed sync statistics for each organization
 
 ## Setup Instructions
 
@@ -26,7 +69,12 @@ Add the following secrets to your repository settings (`Settings > Secrets and v
 - `SOURCE_GITHUB_TOKEN`: Personal Access Token for the source GitHub personal account with the following permissions:
   - `repo` (full repository access)
   - `read:user` (read user profile information)
-  
+
+**For Multi-Organization Sync:**
+- `ICP21_GITHUB_TOKEN`: Personal Access Token for the `icp21` organization (if using)
+- `ESPRESSO21_GITHUB_TOKEN`: Personal Access Token for the `espresso21` organization (if using)
+
+**For Single Organization Sync (Legacy/Fallback):**
 - `TARGET_GITHUB_TOKEN`: Personal Access Token for the target GitHub organization with the following permissions:
   - `repo` (full repository access)
   - `read:org` and `write:org` (organization access to create repositories)
@@ -36,7 +84,11 @@ Add the following secrets to your repository settings (`Settings > Secrets and v
 Add the following repository variables (`Settings > Secrets and variables > Actions > Variables`):
 
 - `SOURCE_USER`: Your GitHub username (e.g., `johndoe`)
+
+**For Single Organization Sync (Legacy/Fallback):**
 - `TARGET_ORG`: Name of the target GitHub organization (e.g., `my-company-org`)
+
+**Note:** For multi-organization sync, target organizations are determined automatically based on repository topics.
 
 ### 3. Creating Personal Access Tokens
 
@@ -81,14 +133,21 @@ This repository includes three workflows:
 
 ## Features
 
-- ✅ **Topic-based Filtering**: Only syncs repositories with the "codesync" topic
+- ✅ **Multi-Organization Sync**: Sync different repositories to different organizations based on topics
+- ✅ **Topic-based Filtering**: Only syncs repositories with the "codesync" topic plus organization-specific topics
+- ✅ **Organization Selection**: 
+  - `codesync + icp21` → syncs to icp21 organization
+  - `codesync + espresso21` → syncs to espresso21 organization
+  - `codesync` only → syncs to default organization (if configured)
 - ✅ **Branch-based Sync**: Syncs to "codesync" branch (not main) for review
 - ✅ **Automatic repository creation**: Creates repositories in target org if they don't exist
 - ✅ **Content sync**: Preserves all commit history and content
 - ✅ **Safe merging**: Allows you to review changes before merging to main
 - ✅ **Incremental sync**: Handles updates to existing branches
+- ✅ **Per-organization statistics**: Detailed logging and statistics by organization
 - ✅ **Error handling**: Detailed logging and error reporting
 - ✅ **Skip archived repos**: Automatically skips archived repositories
+- ✅ **Backward compatibility**: Works with existing single-organization setups
 
 ## How Repository Sync Works
 
@@ -101,14 +160,28 @@ This approach ensures you maintain control over what gets merged into the main b
 
 ## How to Mark Repositories for Sync
 
-To sync a repository, you need to add the "codesync" topic to it:
+To sync a repository, you need to add the "codesync" topic along with an organization-specific topic:
+
+### Multi-Organization Sync
 
 1. Go to your repository on GitHub
 2. Click the gear icon ⚙️ next to "About" on the repository page
-3. In the "Topics" field, add `codesync`
+3. In the "Topics" field, add both topics:
+   - `codesync` (required for all synced repositories)
+   - `icp21` (to sync to the icp21 organization)
+   - OR `espresso21` (to sync to the espresso21 organization)
 4. Click "Save changes"
 
-Only repositories with the "codesync" topic will be synced. This gives you full control over which repositories are included in the sync process.
+**Examples:**
+- Repository with topics `codesync, icp21` → syncs to `icp21` organization
+- Repository with topics `codesync, espresso21` → syncs to `espresso21` organization
+- Repository with topics `codesync, icp21, react` → syncs to `icp21` organization (additional topics are ignored)
+
+### Legacy Single Organization Sync
+
+If you have the `TARGET_ORG` variable and `TARGET_GITHUB_TOKEN` secret configured, repositories with only the `codesync` topic (and no organization-specific topics) will sync to the default target organization.
+
+Only repositories with the "codesync" topic AND a valid target organization (either through organization-specific topics or default configuration) will be synced. This gives you full control over which repositories are included in the sync process.
 
 ## Configuration Options
 
@@ -133,8 +206,15 @@ To include a repository in the sync process:
 
 1. Go to the repository on GitHub
 2. Click the gear icon next to "About"
-3. Add "codesync" to the Topics field
+3. Add the required topics to the Topics field:
+   - `codesync` (always required)
+   - `icp21` (for icp21 organization) OR `espresso21` (for espresso21 organization)
 4. The repository will be included in the next sync run
+
+**Examples:**
+- Add topics: `codesync, icp21` → Repository will sync to icp21 organization
+- Add topics: `codesync, espresso21` → Repository will sync to espresso21 organization
+- Add topics: `codesync` → Repository will sync to default organization (if configured)
 
 ### Working with the Codesync Branch
 
@@ -160,10 +240,19 @@ The workflow syncs the following repository settings:
 
 ### Common Issues
 
-1. **Token Permissions**: Ensure tokens have sufficient permissions
+1. **Token Permissions**: Ensure tokens have sufficient permissions for each organization
 2. **Organization Access**: Verify tokens can access both source and target organizations
-3. **Rate Limiting**: GitHub API has rate limits; workflows include delays to handle this
-4. **Large Repositories**: Very large repos may timeout; consider running sync manually for initial setup
+3. **Missing Organization Tokens**: Repositories will be skipped if no valid organization token is configured
+4. **Topic Configuration**: Ensure repositories have both `codesync` and a valid organization topic
+5. **Rate Limiting**: GitHub API has rate limits; workflows include delays to handle this
+6. **Large Repositories**: Very large repos may timeout; consider running sync manually for initial setup
+
+### Multi-Organization Troubleshooting
+
+1. **No repositories found**: Check that repositories have both `codesync` and organization-specific topics
+2. **Organization token errors**: Verify organization-specific tokens are correctly configured as secrets
+3. **Mixed sync results**: Check per-organization statistics in workflow logs to identify which org had issues
+4. **Default org fallback**: Repositories with only `codesync` topic need `TARGET_ORG` and `TARGET_GITHUB_TOKEN` configured
 
 ### Monitoring Workflow Runs
 
