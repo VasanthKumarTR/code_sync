@@ -314,7 +314,11 @@ jobs:
             
             if (repos.length === 0) {
               console.log('ℹ️ No repositories found with "codesync" topic and valid target organization');
-              console.log('💡 To sync a repository, add the "codesync" topic plus one of: icp21, espresso21');
+              const orgNames = Object.keys(orgMapping).filter(key => key !== 'default' && orgMapping[key].token);
+              if (orgMapping.default) {
+                orgNames.push(`default (${orgMapping.default.org})`);
+              }
+              console.log(`💡 To sync a repository, add the "codesync" topic plus one of: ${orgNames.join(', ')}`);
               console.log('💡 Or configure default TARGET_ORG and TARGET_GITHUB_TOKEN for fallback');
               return;
             }
